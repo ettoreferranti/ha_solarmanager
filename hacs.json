@@ -1,0 +1,5 @@
+{
+  "name": "Solar Manager (v3, read-only)",
+  "render_readme": true,
+  "homeassistant": "2024.1.0"
+}

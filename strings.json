@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Solar Manager",
+        "description": "Enter your Solar Manager cloud credentials and your gateway smId.",
+        "data": {
+          "email": "E-mail",
+          "password": "Password",
+          "sm_id": "Gateway smId (16-character ID printed on the gateway)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach Solar Manager cloud. Check your internet connection.",
+      "invalid_auth": "Invalid e-mail or password.",
+      "unknown": "Unexpected error. See logs for details."
+    },
+    "abort": {
+      "already_configured": "This gateway is already configured."
+    }
+  }
+}

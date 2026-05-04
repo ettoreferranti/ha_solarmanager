@@ -1,0 +1,13 @@
+{
+  "domain": "solarmanager",
+  "name": "Solar Manager (v3, read-only)",
+  "version": "0.1.0",
+  "documentation": "https://github.com/ettoreferranti/ha_solarmanager",
+  "issue_tracker": "https://github.com/ettoreferranti/ha_solarmanager/issues",
+  "codeowners": ["@ettoreferranti"],
+  "config_flow": true,
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "dependencies": [],
+  "integration_type": "hub"
+}
