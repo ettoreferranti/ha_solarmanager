@@ -1,5 +1,5 @@
 {
-  "domain": "solarmanager",
+  "domain": "solarmanager_v3",
   "name": "Solar Manager (v3, read-only)",
   "version": "0.1.0",
   "documentation": "https://github.com/ettoreferranti/ha_solarmanager",

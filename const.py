@@ -1,7 +1,7 @@
 """Constants for the Solar Manager v3 integration."""
 from __future__ import annotations
 
-DOMAIN = "solarmanager"
+DOMAIN = "solarmanager_v3"
 
 # API
 API_BASE = "https://cloud.solar-manager.ch"
