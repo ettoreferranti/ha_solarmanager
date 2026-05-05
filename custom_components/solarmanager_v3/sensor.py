@@ -25,6 +25,8 @@ def _device_class_from_str(name: str | None) -> SensorDeviceClass | None:
         return SensorDeviceClass.BATTERY
     if name == "temperature":
         return SensorDeviceClass.TEMPERATURE
+    if name == "energy":
+        return SensorDeviceClass.ENERGY
     return None
 
 
@@ -159,8 +161,9 @@ class SolarManagerDeviceSensor(_Base):
         self._attr_unique_id = f"{sm_id}_dev_{device_id}_{field}"
         self._attr_native_unit_of_measurement = unit or None
         self._attr_device_class = device_class
-        # Only mark numeric quantities as measurement state class.
-        if device_class is not None or unit in ("W", "%", "°C"):
+        if device_class == SensorDeviceClass.ENERGY:
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        elif device_class is not None or unit in ("W", "%", "°C"):
             self._attr_state_class = SensorStateClass.MEASUREMENT
         if icon:
             self._attr_icon = icon

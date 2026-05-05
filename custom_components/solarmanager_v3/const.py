@@ -40,4 +40,6 @@ DEVICE_SENSORS: tuple[tuple[str, str, str | None, str, str | None], ...] = (
     ("temperature", "°C", "temperature", "Temperature",      "mdi:thermometer"),
     ("activeDevice","",   None,          "Active",           "mdi:power"),
     ("signal",      "",   None,          "Signal",           "mdi:wifi"),
+    ("iWhTotal",    "Wh", "energy",      "Energy Consumed",  "mdi:lightning-bolt"),
+    ("eWhTotal",    "Wh", "energy",      "Energy Produced",  "mdi:solar-power"),
 )

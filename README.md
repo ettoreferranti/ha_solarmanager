@@ -2,7 +2,7 @@
 
 A minimal, **read-only** Home Assistant integration for [Solar Manager](https://www.solar-manager.ch/), built on the official v3 cloud API.
 
-It exposes the household-level (gateway) live values plus per-device sensors, with proper `device_class` and `state_class` attributes so they work directly with the **Energy dashboard** (via Riemann integral helpers — see below).
+It exposes the household-level (gateway) live W values plus per-device sensors, including the gateway's own monotonic Wh counters (`iWhTotal` / `eWhTotal`) which feed the **Energy dashboard** directly — no Riemann helpers required.
 
 > **Read-only by design.** This integration intentionally does not call any `PUT` endpoints. No battery-mode or heat-pump-mode control surface is exposed. If those are ever added, they will land behind an explicit option in a future v0.2.
 
@@ -36,25 +36,26 @@ Copy `custom_components/solarmanager/` into your HA config's `custom_components/
 
 ### Per-device sensors (one device per Solar Manager-registered inverter / battery / meter)
 
-`power`, `soc`, `temperature`, `activeDevice`, `signal` — only the fields actually present in the stream payload for that device.
+`power`, `soc`, `temperature`, `activeDevice`, `signal`, `iWhTotal` (Energy Consumed, Wh), `eWhTotal` (Energy Produced, Wh) — only the fields actually present in the stream payload for that device.
+
+`iWhTotal` / `eWhTotal` are exposed with `device_class: energy` and `state_class: total_increasing` — native Wh from the gateway, displayed by HA in kWh.
 
 ## Wiring up the Energy dashboard
 
-The API gives **instantaneous power** in W. The Energy dashboard wants **monotonically increasing kWh counters**. Bridge them with HA's built-in **Riemann integral** helper:
+Point each Energy dashboard slot directly at the relevant per-device `Energy Consumed` / `Energy Produced` sensor. These map to the gateway's own measured Wh accumulators, so totals match what Solar Manager's web UI shows. No Riemann helpers required.
 
-1. Settings → Devices & Services → Helpers → **+ Create Helper** → "Integration - Riemann sum integral".
-2. Input: `sensor.solar_manager_pv_production_power`
-3. Method: **Trapezoidal**, Unit prefix: **k** (so output is kWh), Time unit: **hours**.
-4. Name: e.g. `PV produced (cumulative)`.
-5. Repeat for `cW`, `iW`, `eW`, `bcW`, `bdW`.
+Settings → Dashboards → Energy → for each slot:
 
-Then in Settings → Dashboards → Energy, point each Energy dashboard slot at the corresponding Riemann sensor:
+- **Solar panels** → inverter device's `Energy Produced`
+- **Grid consumption** → grid-meter device's `Energy Consumed`
+- **Return to grid** → grid-meter device's `Energy Produced`
+- **Home battery storage → Energy going in to the battery** → battery device's `Energy Consumed`
+- **Home battery storage → Energy coming out of the battery** → battery device's `Energy Produced`
+- **Individual devices** (heat pump, EV, plugs) → that device's `Energy Consumed`
 
-- **Solar production** → integral of `pW`
-- **Grid import** → integral of `iW`
-- **Grid export** → integral of `eW`
-- **Battery charge** (energy going in) → integral of `bcW`
-- **Battery discharge** (energy coming out) → integral of `bdW`
+For natively-monitored devices (Easee EV charger, Luxtronik heat pump, etc.) the device's own kWh sensor is usually more accurate than the Solar Manager-reported counter — prefer the native one when available.
+
+The gateway-level **W** sensors (`pW`/`cW`/`iW`/`eW`/`bcW`/`bdW`) remain available for live-power Lovelace cards (gauges, tile cards, ApexCharts) but are no longer the recommended path for Energy dashboard sources.
 
 ## API endpoints used
 
