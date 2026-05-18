@@ -4,7 +4,12 @@ This document captures design decisions and the reasoning behind them, so future
 
 ## What this integration is
 
-A custom Home Assistant integration for [Solar Manager](https://www.solar-manager.ch/), the Swiss home-energy management product, built directly against their published v3 cloud API.
+A custom Home Assistant integration for [Solar Manager](https://www.solar-manager.ch/), the Swiss home-energy management product. Two interchangeable transports:
+
+- **Cloud** — talks to Solar Manager's published v3 REST API at `cloud.solar-manager.ch` with email/password + JWT.
+- **Local** — talks directly to the gateway over HTTPS at `/v2/point` with a static `X-API-Key` header.
+
+The user picks one at setup and can switch later via the options flow. The coordinator and sensor platform are transport-agnostic; both transports return a normalised snapshot dict.
 
 Currently **read-only by design**. Exposes both the gateway-level live aggregates (PV / consumption / grid / battery) and a per-device sensor set, organised cleanly under one config entry.
 
@@ -27,13 +32,25 @@ If write functionality is added in v0.2+, it must be:
 - Implemented as HA `service` calls, not as `switch` or `number` entities — so writes only happen via deliberate `service.call`, never as a side-effect of UI fiddling or accidental automation triggers.
 - Documented per-service in the README with an explicit risk note.
 
-### Endpoint choice: v3 stream, not v1 statistics
+### Endpoint choice — cloud: v3 stream, not v1 statistics
 
 The v1 `/statistics/gateways/{smId}` endpoint returns daily/monthly/yearly totals — convenient but coarse, and updates only when Solar Manager's backend recomputes (~hourly).
 
 The v3 stream endpoint returns instantaneous power values plus interval Wh, sampled at ~10 s on the gateway and exposed to API consumers on demand. Polling it at 30 s gives near-live data, and HA's own helpers turn the W values into accurate cumulative kWh.
 
 Trade-off: 30 s polling means power spikes shorter than 30 s are missed. Acceptable for heat pumps, PV arrays, and batteries — these don't change in sub-30 s bursts that materially affect daily energy. Less accurate for high-frequency loads like microwaves, but plug-level monitoring is best done with Shelly devices or similar, not via the Solar Manager aggregator.
+
+### Endpoint choice — local: /v2/point
+
+Reverse-engineered from a working gateway. Single endpoint returning a snapshot dict that overlaps significantly with the cloud `/stream` payload but is leaner:
+
+- No `iW`/`eW` at the gateway level — we synthesize them from the grid meter device's signed `power`. The grid meter is identified at runtime as the device whose cumulative `iWh`/`eWh` is closest to the gateway-level totals; the `_id` is cached for the LocalTransport instance after first identification, so transient near-zero polls don't lose the entities.
+- No `/info/sensors` equivalent — device naming is unavailable in pure local mode.
+- Per-device `iWh`/`eWh` are exposed but observation shows they are **not** strictly monotonic. They are deliberately NOT mapped to `iWhTotal`/`eWhTotal` (the cloud's cumulative counters), to avoid feeding non-monotonic values into `total_increasing` sensors that the recorder would warn about.
+
+Auth: the gateway UI accepts a plaintext password, hashes it with SHA-512, and stores the hash. The HTTP API expects the **plaintext** password in the `X-API-Key` header — the server re-hashes incoming requests and compares.
+
+TLS: the gateway uses a self-signed certificate; `verify_ssl` defaults to `False` in `LocalTransport`. Users can opt in via the config form if they've installed the gateway's CA on HA.
 
 ### kWh derivation lives in HA config, not the integration
 
@@ -65,12 +82,12 @@ Each Solar Manager gateway (smId) is one config entry. Users with multiple sites
 
 ```
 custom_components/solarmanager_v3/
-├── __init__.py          # async_setup_entry, async_unload_entry
-├── api.py               # SolarManagerClient: aiohttp-based, login + refresh + GET
-├── config_flow.py       # UI wizard for email/password/smId
-├── const.py             # endpoint URLs, polling interval, sensor field maps
-├── coordinator.py       # SolarManagerCoordinator: 30 s polling DataUpdateCoordinator
-├── sensor.py            # Gateway and per-device sensor entities
+├── __init__.py          # async_setup_entry, async_unload_entry, transport builder
+├── transport.py         # SolarManagerTransport protocol + CloudTransport + LocalTransport
+├── config_flow.py       # Cloud/Local menu + per-transport forms + options flow
+├── const.py             # endpoint URLs, polling interval, sensor field maps, transport keys
+├── coordinator.py       # SolarManagerCoordinator: transport-agnostic polling
+├── sensor.py            # Gateway and per-device sensor entities (filter by key presence)
 ├── manifest.json
 ├── strings.json         # Config flow text (master)
 └── translations/
@@ -84,24 +101,33 @@ Domain is `solarmanager_v3`, *not* `solarmanager`, to coexist with the Soardiac 
 
 ## API observations
 
+### Cloud
 - The login response field names are not strictly documented — code accepts both `accessToken`/`access_token` styles to survive backend renames.
 - `GET /v1/info/sensors/{smId}` returns a list, not an object. Each item has `_id`, `name`, `type`, etc. We use this for friendly device naming on first setup.
 - The `devices[]` array in the stream response includes one entry per registered Solar Manager device. Field availability per device varies — see `_id`-based device matching in `sensor.py`.
 - Stream polling at < 10 s makes no sense; the gateway internally aggregates over 10 s windows and returns the same snapshot. 30 s is a good default; 60 s reasonable for low-traffic accounts.
 
+### Local
+- `/v2/point` returns the same general shape as the cloud `/stream` (top-level snapshot + `devices[]`) but slimmer. See `LocalTransport._normalize` for the field-by-field mapping.
+- The gateway-level cumulative energies (`pWh`, `cWh`, `iWh`, `eWh`, etc.) are NOT strictly monotonic across the day — observation shows them resetting/dropping in the evening. They are not exposed as `total_increasing` sensors.
+- Per-device `iWh`/`eWh` have similar non-monotonic behaviour (small downward ticks of 0.01–0.02 Wh between polls). The v0.3.2 release removed the alias that fed them into `iWhTotal`/`eWhTotal` sensors.
+
 ## Testing approach (not yet implemented)
 
 The integration has no automated tests yet. When adding them:
 - `pytest` + `pytest-homeassistant-custom-component` is the conventional choice.
-- `aioresponses` for mocking HTTP calls in `api.py`.
-- Test coverage priorities: token refresh logic in `api.py`, payload field extraction in `sensor.py`, config flow validation in `config_flow.py`.
+- `aioresponses` for mocking HTTP calls in `transport.py`.
+- Test coverage priorities:
+  - `CloudTransport`: token refresh logic, 401 retry-once, malformed responses.
+  - `LocalTransport._identify_grid_meter`: real payload fixtures covering day-time (large eWh), night-time (tiny eWh near zero), all-zero (post-boot), ambiguous (multiple devices tied).
+  - Sensor entity value extraction with edge cases (None, missing field, wrong type).
+  - Config flow: both Cloud and Local paths, invalid creds, network error, duplicate gateway.
 
 ## How we got here (summary)
 
-This integration was developed in a single session where:
-1. The user reported the existing community integration (Soardiac) gave inaccurate numbers in HA's Energy dashboard.
+1. The existing community integration (Soardiac) gave inaccurate numbers in HA's Energy dashboard.
 2. Investigation of the Solar Manager v3 API revealed gateway-level aggregate fields the community integration didn't expose.
-3. Rather than fork and patch upstream, we wrote a minimal new integration focused on the gateway-aggregate gap.
-4. The integration was published to GitHub and installed via HACS as a custom repository, then a v0.1.0 release.
-5. A separate `configuration.yaml` block creates 10 Riemann integral helpers on top of the integration's W sensors, providing the kWh counters the Energy dashboard requires.
-6. Heat-pump and EV-charger kWh come from native integrations (Luxtronik for heat pump, Easee for EV) which provide device-measured kWh — more accurate than Riemann-derived from polled W.
+3. Rather than fork and patch upstream, we wrote a minimal new integration focused on the gateway-aggregate gap → v0.1.0.
+4. v0.2.0 added per-device cumulative kWh sensors (`iWhTotal` / `eWhTotal`) so the Energy dashboard could be wired without Riemann helpers.
+5. v0.3.x added the local API transport. The `/v2/point` endpoint was discovered by capturing the request the gateway's web UI makes, mapping responses to the existing snapshot shape, and synthesising the missing `iW`/`eW` grid-power fields from the grid meter's signed `power` (the meter is the device whose cumulative `iWh`/`eWh` matches the gateway totals).
+6. v0.3.0 itself shipped broken on HA 2026.x — `async_timeout` was no longer bundled, and `OptionsFlow.__init__` had been removed in HA 2025.12. v0.3.1 fixed both. v0.3.2 fixed the per-device energy aliasing that was producing recorder warnings.

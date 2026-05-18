@@ -45,26 +45,34 @@ If you add a feature that would require a write call, the change must:
 2. Be implemented as an HA `service` registered via `async_register_admin_service`, not as an entity property setter.
 3. Bump the integration to v1.0.0 (semantic versioning: read-only-only is a stable contract; breaking it is a major version bump).
 
+This applies to both transports. The Solar Manager local API also has write endpoints (battery control, switch toggles); those are off-limits under the same rule.
+
 ## Where to add what
 
 | Change | File |
 |---|---|
-| New API endpoint | `api.py` (add a method on `SolarManagerClient`) and `const.py` (add the URL constant) |
-| New gateway-level sensor | `const.py` (extend `GATEWAY_SENSORS` tuple) — sensor entity is auto-created |
+| New cloud API endpoint | `transport.py` (add a method on `CloudTransport`) and `const.py` (add the URL constant) |
+| New local API endpoint | `transport.py` (add a method on `LocalTransport`) and `const.py` (add the URL constant) |
+| New gateway-level sensor | `const.py` (extend `GATEWAY_SENSORS` tuple) — sensor entity is auto-created if the field is present in the snapshot |
 | New per-device sensor field | `const.py` (extend `DEVICE_SENSORS` tuple) — same |
 | New device class for an existing field | `sensor.py` (`_device_class_from_str` helper) |
-| Configurable polling interval | `config_flow.py` (add options flow) and `coordinator.py` (read from entry options) |
+| New transport | `transport.py` (implement `SolarManagerTransport` protocol — `async_test`, `async_get_snapshot`, `async_get_devices_meta`) + `config_flow.py` (menu option + form + options-flow step) |
+| Configurable polling interval | `config_flow.py` (extend existing options flow) and `coordinator.py` (read from entry options) |
 | New translation language | Copy `translations/en.json` to `translations/<code>.json` |
 
 ## Adding new sensors
 
 The pattern is:
 
-1. Look at the Solar Manager v3 API spec (Swagger UI: <https://cloud.solar-manager.ch/solarManager/swagger.json>).
-2. Confirm the field is in the stream payload by capturing one with debug logging (set `logger.custom_components.solarmanager_v3: debug` in `configuration.yaml`).
+1. Identify the source field. Cloud: Solar Manager v3 swagger (<https://cloud.solar-manager.ch/solarManager/swagger.json>). Local: capture a `/v2/point` response from your gateway and inspect.
+2. Confirm the field is in the snapshot by adding debug logging (`logger: custom_components.solarmanager_v3: debug` in `configuration.yaml`) and watching `home-assistant.log`.
 3. Add a tuple entry in `const.py`'s `GATEWAY_SENSORS` or `DEVICE_SENSORS`.
 4. Tuple format: `(api_field_name, unit, device_class_string, friendly_name, mdi_icon)`.
 5. For non-trivial cases (e.g. fields needing transformation), edit `sensor.py`'s `native_value` property.
+
+`sensor.py` already filters by key presence in the first snapshot, so a sensor declared in `GATEWAY_SENSORS` is only instantiated when the active transport's payload actually contains the field. That keeps cloud-only and local-only fields out of the wrong mode automatically.
+
+For transport-specific field reshaping (e.g. the synthesis of `iW`/`eW` in local mode), do it in the transport's normalization step, not in `sensor.py`.
 
 ## Versioning
 
