@@ -250,29 +250,25 @@ class LocalTransport:
     def _normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Reshape the local /v2/point payload to match what sensor.py expects.
 
-        Two adjustments:
-        1. Per-device energy keys: local emits `iWh`/`eWh`, cloud emits
-           `iWhTotal`/`eWhTotal`. We alias rather than rename so
-           debugging-by-eye stays easy.
-        2. Synthesize gateway `iW`/`eW` (instantaneous grid import/export
-           power) from the grid meter device's signed `power`. The local
-           API doesn't expose these as gateway fields, but the grid meter
-           is identifiable as the device whose cumulative `iWh`/`eWh` is
-           closest to the gateway-level totals. Sign convention: negative
-           power on the meter = export, positive = import (verified from
-           real payloads).
+        Synthesizes gateway `iW`/`eW` (instantaneous grid import/export
+        power) from the grid meter device's signed `power`. The local
+        API doesn't expose these as gateway fields, but the grid meter
+        is identifiable as the device whose cumulative `iWh`/`eWh` is
+        closest to the gateway-level totals. Sign convention: negative
+        power on the meter = export, positive = import (verified from
+        real payloads).
+
+        Note: the local API also emits per-device `iWh`/`eWh` fields,
+        but observation shows they are not strictly monotonic (they can
+        decrease poll-to-poll). They are therefore NOT mapped to the
+        cumulative `iWhTotal`/`eWhTotal` sensors the cloud transport
+        feeds; in local mode those per-device energy sensors are simply
+        not created.
         """
         devices = raw.get("devices") or []
-        normalized_devices: list[dict[str, Any]] = []
-        for dev in devices:
-            if not isinstance(dev, dict):
-                continue
-            new = dict(dev)
-            if "iWh" in new and "iWhTotal" not in new:
-                new["iWhTotal"] = new["iWh"]
-            if "eWh" in new and "eWhTotal" not in new:
-                new["eWhTotal"] = new["eWh"]
-            normalized_devices.append(new)
+        normalized_devices: list[dict[str, Any]] = [
+            dict(dev) for dev in devices if isinstance(dev, dict)
+        ]
 
         out = dict(raw)
         out["devices"] = normalized_devices
