@@ -3,21 +3,75 @@
     "step": {
       "user": {
         "title": "Solar Manager",
+        "description": "Wählen Sie, wie Home Assistant mit Ihrem Solar Manager Gateway kommunizieren soll.",
+        "menu_options": {
+          "cloud": "Cloud (solar-manager.ch-Konto)",
+          "local": "Lokal (Gateway-IP + API-Schlüssel)"
+        }
+      },
+      "cloud": {
+        "title": "Solar Manager Cloud",
         "description": "Solar Manager Cloud-Anmeldedaten und smId des Gateways eingeben.",
         "data": {
           "email": "E-Mail",
           "password": "Passwort",
           "sm_id": "Gateway smId (16-stellige ID auf dem Gateway)"
         }
+      },
+      "local": {
+        "title": "Solar Manager Lokal",
+        "description": "Lokale Adresse des Gateways und den in der Weboberfläche generierten API-Schlüssel eingeben.",
+        "data": {
+          "host": "Host oder IP des Gateways (z. B. 192.168.1.133)",
+          "api_key": "API-Schlüssel (das in der Gateway-Oberfläche eingegebene Passwort)",
+          "sm_id": "Gateway smId (optional, als Präfix für Entitäts-IDs, um den Verlauf beim Wechsel von Cloud zu erhalten)",
+          "verify_ssl": "TLS-Zertifikat prüfen (standardmäßig aus - Gateway verwendet selbstsigniertes Zertifikat)"
+        }
       }
     },
     "error": {
-      "cannot_connect": "Verbindung zur Solar Manager Cloud nicht möglich. Internetverbindung prüfen.",
-      "invalid_auth": "E-Mail oder Passwort ungültig.",
+      "cannot_connect": "Solar Manager API nicht erreichbar. Adresse und Netzwerk prüfen.",
+      "invalid_auth": "Authentifizierung fehlgeschlagen. Anmeldedaten oder API-Schlüssel prüfen.",
       "unknown": "Unerwarteter Fehler. Details im Protokoll."
     },
     "abort": {
       "already_configured": "Dieses Gateway ist bereits konfiguriert."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Solar Manager",
+        "description": "Transport wechseln oder Anmeldedaten aktualisieren.",
+        "menu_options": {
+          "cloud": "Cloud (solar-manager.ch-Konto)",
+          "local": "Lokal (Gateway-IP + API-Schlüssel)"
+        }
+      },
+      "cloud": {
+        "title": "Solar Manager Cloud",
+        "description": "Solar Manager Cloud-Anmeldedaten aktualisieren.",
+        "data": {
+          "email": "E-Mail",
+          "password": "Passwort",
+          "sm_id": "Gateway smId"
+        }
+      },
+      "local": {
+        "title": "Solar Manager Lokal",
+        "description": "Gateway-Adresse und API-Schlüssel aktualisieren.",
+        "data": {
+          "host": "Host oder IP des Gateways",
+          "api_key": "API-Schlüssel",
+          "sm_id": "Gateway smId (optional)",
+          "verify_ssl": "TLS-Zertifikat prüfen"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Solar Manager API nicht erreichbar. Adresse und Netzwerk prüfen.",
+      "invalid_auth": "Authentifizierung fehlgeschlagen. Anmeldedaten oder API-Schlüssel prüfen.",
+      "unknown": "Unerwarteter Fehler. Details im Protokoll."
     }
   }
 }

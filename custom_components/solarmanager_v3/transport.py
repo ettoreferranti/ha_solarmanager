@@ -1,9 +1,14 @@
-"""Lightweight async client for the Solar Manager External API (read-only)."""
+"""Transport layer for the Solar Manager integration.
+
+Two interchangeable transports speak to either the cloud REST API or the
+gateway's local HTTPS API. Both return the same normalized snapshot shape
+so the coordinator and sensor platform don't need to care which is in use.
+"""
 from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Protocol
 
 import aiohttp
 import async_timeout
@@ -12,6 +17,7 @@ from .const import (
     API_BASE,
     ENDPOINT_INFO_SENSORS,
     ENDPOINT_LOGIN,
+    ENDPOINT_LOCAL_POINT,
     ENDPOINT_REFRESH,
     ENDPOINT_STREAM,
     REQUEST_TIMEOUT_SECONDS,
@@ -29,13 +35,19 @@ class SolarManagerApiError(Exception):
     """Raised on non-auth API errors."""
 
 
-class SolarManagerClient:
-    """Minimal read-only client.
+class SolarManagerTransport(Protocol):
+    """Interface implemented by both Cloud and Local transports."""
 
-    Owns an access token + refresh token and renews them transparently.
-    The access-token lifetime returned by Solar Manager is not fixed in the
-    public docs, so we treat any 401 as "refresh and retry once".
-    """
+    async def async_test(self) -> None: ...
+    async def async_get_snapshot(self) -> dict[str, Any]: ...
+    async def async_get_devices_meta(self) -> list[dict[str, Any]]: ...
+
+
+# ---- Cloud ---------------------------------------------------------------
+
+
+class CloudTransport:
+    """Talks to https://cloud.solar-manager.ch with email/password + JWT."""
 
     def __init__(
         self,
@@ -51,29 +63,21 @@ class SolarManagerClient:
 
         self._access_token: str | None = None
         self._refresh_token: str | None = None
-        self._access_token_expires_at: float = 0.0  # epoch seconds
+        self._access_token_expires_at: float = 0.0
 
-    # ---- public surface ---------------------------------------------------
-
-    async def async_test_credentials(self) -> None:
-        """Try logging in once. Raises on failure."""
+    async def async_test(self) -> None:
         await self._login()
 
-    async def async_get_stream(self) -> dict[str, Any]:
-        """Return the latest gateway + per-device stream snapshot."""
+    async def async_get_snapshot(self) -> dict[str, Any]:
         return await self._get_with_auth(ENDPOINT_STREAM.format(sm_id=self._sm_id))
 
-    async def async_get_sensors_info(self) -> list[dict[str, Any]]:
-        """Return the device list (used for naming on first setup)."""
+    async def async_get_devices_meta(self) -> list[dict[str, Any]]:
         result = await self._get_with_auth(
             ENDPOINT_INFO_SENSORS.format(sm_id=self._sm_id)
         )
-        # The endpoint returns a list directly per the swagger spec.
         if isinstance(result, list):
             return result
         return []
-
-    # ---- internals --------------------------------------------------------
 
     async def _login(self) -> None:
         url = f"{API_BASE}{ENDPOINT_LOGIN}"
@@ -107,7 +111,6 @@ class SolarManagerClient:
             async with async_timeout.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.post(url, json=payload) as resp:
                     if resp.status in (401, 403):
-                        # refresh token rejected -> full re-login
                         _LOGGER.debug("Refresh rejected, falling back to login")
                         await self._login()
                         return
@@ -123,24 +126,13 @@ class SolarManagerClient:
         self._store_tokens(data)
 
     def _store_tokens(self, data: dict[str, Any]) -> None:
-        # Field names in the response: the swagger labels them generically as
-        # Model68 / Model70. Common JWT-issuer responses use either
-        # accessToken/refreshToken or access_token/refresh_token. Accept both.
         access = (
             data.get("accessToken")
             or data.get("access_token")
             or data.get("token")
         )
-        refresh = (
-            data.get("refreshToken")
-            or data.get("refresh_token")
-        )
-        # Lifetime hint, if any
-        ttl = (
-            data.get("expiresIn")
-            or data.get("expires_in")
-            or 3600  # safe default
-        )
+        refresh = data.get("refreshToken") or data.get("refresh_token")
+        ttl = data.get("expiresIn") or data.get("expires_in") or 3600
 
         if not access:
             raise SolarManagerAuthError(
@@ -157,9 +149,6 @@ class SolarManagerClient:
         self._access_token_expires_at = time.time() + max(
             ttl_int - TOKEN_REFRESH_LEEWAY_SECONDS, 30
         )
-        _LOGGER.debug(
-            "Stored tokens; access valid for ~%ss", ttl_int
-        )
 
     async def _ensure_token(self) -> None:
         if self._access_token is None:
@@ -169,7 +158,6 @@ class SolarManagerClient:
             await self._refresh()
 
     async def _get_with_auth(self, path: str) -> Any:
-        """GET path with bearer auth; on 401 refresh once and retry."""
         await self._ensure_token()
         url = f"{API_BASE}{path}"
 
@@ -179,7 +167,6 @@ class SolarManagerClient:
                 async with async_timeout.timeout(REQUEST_TIMEOUT_SECONDS):
                     async with self._session.get(url, headers=headers) as resp:
                         if resp.status == 401 and attempt == 1:
-                            _LOGGER.debug("401 on %s, refreshing token", path)
                             await self._refresh()
                             continue
                         if resp.status >= 400:
@@ -193,5 +180,97 @@ class SolarManagerClient:
                     f"Network error on {path}: {err}"
                 ) from err
 
-        # Shouldn't be reachable
         raise SolarManagerApiError(f"GET {path} failed after retry")
+
+
+# ---- Local ---------------------------------------------------------------
+
+
+class LocalTransport:
+    """Talks to the gateway directly over HTTPS using a static API key."""
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        host: str,
+        api_key: str,
+        verify_ssl: bool = False,
+    ) -> None:
+        self._session = session
+        self._base_url = _normalize_host(host)
+        self._api_key = api_key
+        self._verify_ssl = verify_ssl
+
+    async def async_test(self) -> None:
+        await self._get_point()
+
+    async def async_get_snapshot(self) -> dict[str, Any]:
+        raw = await self._get_point()
+        return _normalize_local_snapshot(raw)
+
+    async def async_get_devices_meta(self) -> list[dict[str, Any]]:
+        # Local API has no equivalent of /info/sensors; device names/types
+        # are unavailable in this mode.
+        return []
+
+    async def _get_point(self) -> dict[str, Any]:
+        url = f"{self._base_url}{ENDPOINT_LOCAL_POINT}"
+        headers = {
+            "Accept": "application/json",
+            "X-API-Key": self._api_key,
+        }
+        try:
+            async with async_timeout.timeout(REQUEST_TIMEOUT_SECONDS):
+                async with self._session.get(
+                    url, headers=headers, ssl=self._verify_ssl
+                ) as resp:
+                    if resp.status in (401, 403):
+                        raise SolarManagerAuthError(
+                            f"Local API rejected key ({resp.status})"
+                        )
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        raise SolarManagerApiError(
+                            f"GET /v2/point HTTP {resp.status}: {text[:200]}"
+                        )
+                    data = await resp.json()
+        except aiohttp.ClientError as err:
+            raise SolarManagerApiError(
+                f"Network error on local /v2/point: {err}"
+            ) from err
+
+        if not isinstance(data, dict):
+            raise SolarManagerApiError("Local /v2/point did not return a JSON object")
+        return data
+
+
+def _normalize_host(host: str) -> str:
+    """Accept '192.168.1.10', 'https://192.168.1.10', or with trailing /."""
+    host = host.strip().rstrip("/")
+    if not host.startswith(("http://", "https://")):
+        host = f"https://{host}"
+    return host
+
+
+def _normalize_local_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
+    """Reshape the local /v2/point payload to match what sensor.py expects.
+
+    The only structural difference is per-device energy keys: local emits
+    `iWh`/`eWh`, cloud emits `iWhTotal`/`eWhTotal`. We alias rather than
+    rename so debugging-by-eye stays easy.
+    """
+    devices = raw.get("devices") or []
+    normalized_devices: list[dict[str, Any]] = []
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        new = dict(dev)
+        if "iWh" in new and "iWhTotal" not in new:
+            new["iWhTotal"] = new["iWh"]
+        if "eWh" in new and "eWhTotal" not in new:
+            new["eWhTotal"] = new["eWh"]
+        normalized_devices.append(new)
+
+    out = dict(raw)
+    out["devices"] = normalized_devices
+    return out

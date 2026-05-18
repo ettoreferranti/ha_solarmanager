@@ -41,8 +41,13 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = []
 
-    # Gateway-level sensors
+    # Gateway-level sensors: only create entities for fields present in the
+    # first payload, since the local transport returns a leaner shape than
+    # the cloud (no iW/eW, for example).
+    snapshot = coordinator.data or {}
     for key, unit, dev_class, name, icon in GATEWAY_SENSORS:
+        if key not in snapshot:
+            continue
         entities.append(
             SolarManagerGatewaySensor(
                 coordinator=coordinator,
@@ -58,7 +63,7 @@ async def async_setup_entry(
     # Per-device sensors: only create entities for fields present in the
     # very first stream payload, so we don't spam users with always-None
     # sensors for irrelevant fields (e.g. SOC for a non-battery inverter).
-    devices_payload = (coordinator.data or {}).get("devices") or []
+    devices_payload = snapshot.get("devices") or []
     for dev in devices_payload:
         dev_id = dev.get("_id")
         if not dev_id:
