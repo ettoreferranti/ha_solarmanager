@@ -6,12 +6,12 @@ so the coordinator and sensor platform don't need to care which is in use.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Protocol
 
 import aiohttp
-import async_timeout
 
 from .const import (
     API_BASE,
@@ -83,7 +83,7 @@ class CloudTransport:
         url = f"{API_BASE}{ENDPOINT_LOGIN}"
         payload = {"email": self._email, "password": self._password}
         try:
-            async with async_timeout.timeout(REQUEST_TIMEOUT_SECONDS):
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.post(url, json=payload) as resp:
                     if resp.status in (401, 403):
                         raise SolarManagerAuthError(
@@ -108,7 +108,7 @@ class CloudTransport:
         url = f"{API_BASE}{ENDPOINT_REFRESH}"
         payload = {"refreshToken": self._refresh_token}
         try:
-            async with async_timeout.timeout(REQUEST_TIMEOUT_SECONDS):
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.post(url, json=payload) as resp:
                     if resp.status in (401, 403):
                         _LOGGER.debug("Refresh rejected, falling back to login")
@@ -164,7 +164,7 @@ class CloudTransport:
         for attempt in (1, 2):
             headers = {"Authorization": f"Bearer {self._access_token}"}
             try:
-                async with async_timeout.timeout(REQUEST_TIMEOUT_SECONDS):
+                async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     async with self._session.get(url, headers=headers) as resp:
                         if resp.status == 401 and attempt == 1:
                             await self._refresh()
@@ -200,13 +200,17 @@ class LocalTransport:
         self._base_url = _normalize_host(host)
         self._api_key = api_key
         self._verify_ssl = verify_ssl
+        # Cached once the grid-meter device is identified by matching its
+        # cumulative iWh/eWh against the gateway totals. Survives transient
+        # poll cycles where the totals are near-zero and ambiguous.
+        self._grid_meter_id: str | None = None
 
     async def async_test(self) -> None:
         await self._get_point()
 
     async def async_get_snapshot(self) -> dict[str, Any]:
         raw = await self._get_point()
-        return _normalize_local_snapshot(raw)
+        return self._normalize(raw)
 
     async def async_get_devices_meta(self) -> list[dict[str, Any]]:
         # Local API has no equivalent of /info/sensors; device names/types
@@ -220,7 +224,7 @@ class LocalTransport:
             "X-API-Key": self._api_key,
         }
         try:
-            async with async_timeout.timeout(REQUEST_TIMEOUT_SECONDS):
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.get(
                     url, headers=headers, ssl=self._verify_ssl
                 ) as resp:
@@ -243,6 +247,105 @@ class LocalTransport:
             raise SolarManagerApiError("Local /v2/point did not return a JSON object")
         return data
 
+    def _normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Reshape the local /v2/point payload to match what sensor.py expects.
+
+        Two adjustments:
+        1. Per-device energy keys: local emits `iWh`/`eWh`, cloud emits
+           `iWhTotal`/`eWhTotal`. We alias rather than rename so
+           debugging-by-eye stays easy.
+        2. Synthesize gateway `iW`/`eW` (instantaneous grid import/export
+           power) from the grid meter device's signed `power`. The local
+           API doesn't expose these as gateway fields, but the grid meter
+           is identifiable as the device whose cumulative `iWh`/`eWh` is
+           closest to the gateway-level totals. Sign convention: negative
+           power on the meter = export, positive = import (verified from
+           real payloads).
+        """
+        devices = raw.get("devices") or []
+        normalized_devices: list[dict[str, Any]] = []
+        for dev in devices:
+            if not isinstance(dev, dict):
+                continue
+            new = dict(dev)
+            if "iWh" in new and "iWhTotal" not in new:
+                new["iWhTotal"] = new["iWh"]
+            if "eWh" in new and "eWhTotal" not in new:
+                new["eWhTotal"] = new["eWh"]
+            normalized_devices.append(new)
+
+        out = dict(raw)
+        out["devices"] = normalized_devices
+
+        meter = self._identify_grid_meter(raw, normalized_devices)
+        if meter is None and self._grid_meter_id is not None:
+            for dev in normalized_devices:
+                if dev.get("_id") == self._grid_meter_id:
+                    meter = dev
+                    break
+        if meter is not None:
+            self._grid_meter_id = meter.get("_id") or self._grid_meter_id
+            try:
+                power = float(meter.get("power", 0) or 0)
+            except (TypeError, ValueError):
+                power = 0.0
+            out["iW"] = max(power, 0.0)
+            out["eW"] = max(-power, 0.0)
+
+        return out
+
+    def _identify_grid_meter(
+        self, raw: dict[str, Any], devices: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """Pick the device whose (iWh, eWh) is closest to the gateway's.
+
+        Returns ``None`` if multiple devices tie for closest (ambiguous,
+        e.g. right after a daily reset where everything is at zero), or
+        if even the closest is implausibly far away.
+        """
+        g_iWh = raw.get("iWh")
+        g_eWh = raw.get("eWh")
+        if g_iWh is None or g_eWh is None:
+            return None
+        try:
+            g_iWh_f = float(g_iWh)
+            g_eWh_f = float(g_eWh)
+        except (TypeError, ValueError):
+            return None
+
+        best: dict[str, Any] | None = None
+        best_diff: float | None = None
+        ties = 0
+        for dev in devices:
+            d_iWh = dev.get("iWh")
+            d_eWh = dev.get("eWh")
+            if d_iWh is None or d_eWh is None:
+                continue
+            try:
+                diff = abs(float(d_iWh) - g_iWh_f) + abs(float(d_eWh) - g_eWh_f)
+            except (TypeError, ValueError):
+                continue
+            if best_diff is None or diff < best_diff:
+                best = dev
+                best_diff = diff
+                ties = 1
+            elif diff == best_diff:
+                ties += 1
+
+        # Plausibility cap: even the closest match must be within a few Wh.
+        # Cumulative energies grow monotonically, so the grid meter and the
+        # gateway should agree very tightly; anything farther suggests no
+        # grid meter is present in this payload.
+        max_acceptable_diff = 5.0  # Wh
+        if (
+            best is not None
+            and ties == 1
+            and best_diff is not None
+            and best_diff < max_acceptable_diff
+        ):
+            return best
+        return None
+
 
 def _normalize_host(host: str) -> str:
     """Accept '192.168.1.10', 'https://192.168.1.10', or with trailing /."""
@@ -250,27 +353,3 @@ def _normalize_host(host: str) -> str:
     if not host.startswith(("http://", "https://")):
         host = f"https://{host}"
     return host
-
-
-def _normalize_local_snapshot(raw: dict[str, Any]) -> dict[str, Any]:
-    """Reshape the local /v2/point payload to match what sensor.py expects.
-
-    The only structural difference is per-device energy keys: local emits
-    `iWh`/`eWh`, cloud emits `iWhTotal`/`eWhTotal`. We alias rather than
-    rename so debugging-by-eye stays easy.
-    """
-    devices = raw.get("devices") or []
-    normalized_devices: list[dict[str, Any]] = []
-    for dev in devices:
-        if not isinstance(dev, dict):
-            continue
-        new = dict(dev)
-        if "iWh" in new and "iWhTotal" not in new:
-            new["iWhTotal"] = new["iWh"]
-        if "eWh" in new and "eWhTotal" not in new:
-            new["eWhTotal"] = new["eWh"]
-        normalized_devices.append(new)
-
-    out = dict(raw)
-    out["devices"] = normalized_devices
-    return out

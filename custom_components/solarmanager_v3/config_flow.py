@@ -155,14 +155,14 @@ class SolarManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
     ) -> SolarManagerOptionsFlow:
-        return SolarManagerOptionsFlow(config_entry)
+        return SolarManagerOptionsFlow()
 
 
 class SolarManagerOptionsFlow(config_entries.OptionsFlow):
-    """Lets the user swap transport (and update credentials) post-setup."""
+    """Lets the user swap transport (and update credentials) post-setup.
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+    HA injects ``self.config_entry`` automatically; no __init__ needed.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
